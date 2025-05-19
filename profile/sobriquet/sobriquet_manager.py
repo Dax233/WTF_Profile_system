@@ -12,31 +12,23 @@ from stubs.mock_config import global_config
 from stubs.mock_dependencies import (
     get_logger, 
     person_info_manager, 
-    mock_llm_generate_response, # 模拟的LLM响应函数
-    MockChatStream, # 用于类型提示和测试
-    MockMessageRecv, # 用于类型提示和测试
-    get_raw_msg_before_timestamp_with_chat, # 模拟的函数
-    build_readable_messages, # 模拟的函数
-    # relationship_manager # SobriquetManager 的 trigger_sobriquet_analysis 中会用到
+    mock_llm_generate_response, 
+    MockChatStream, 
+    MockMessageRecv, 
+    get_raw_msg_before_timestamp_with_chat, 
+    build_readable_messages,
 )
-# 导入 stubs.mock_dependencies 中的 relationship_manager
 from stubs.mock_dependencies import relationship_manager as mock_relationship_manager
 
 
-# 导入 SQLite 数据库处理器和 ProfileManager
 from .sobriquet_db import SobriquetDB
 from .sobriquet_mapper import _build_mapping_prompt
 from .sobriquet_utils import select_sobriquets_for_prompt, format_sobriquet_prompt_injection
 
-# ProfileManager 将从项目根目录导入
-# from src.experimental.profile.profile_manager import profile_manager # 旧的导入
-# 我们将在 __init__ 中接收 profile_manager 实例，或者从根目录导入（如果它是全局单例）
-# 为了解耦和测试，最好是接收实例。
 
 logger = get_logger("SobriquetManager")
 logger_helper = get_logger("AsyncLoopHelper")
 
-# run_async_loop 函数定义保持不变 (来自用户提供的代码)
 def run_async_loop(loop: asyncio.AbstractEventLoop, coro):
     try:
         logger_helper.debug(f"Running coroutine in loop {id(loop)}...")
@@ -70,7 +62,6 @@ class SobriquetManager:
     _instance = None
     _lock = threading.Lock()
 
-    # __new__ 方法保持不变
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             with cls._lock:
@@ -84,38 +75,35 @@ class SobriquetManager:
         if hasattr(self, "_initialized") and self._initialized:
             return
         with self._lock:
-            if hasattr(self, "_initialized") and self._initialized: # 双重检查锁定
+            if hasattr(self, "_initialized") and self._initialized: 
                 return
             
             logger.info("正在初始化 SobriquetManager 组件 (SQLite 版本)...")
             self.is_enabled = global_config.profile.enable_sobriquet_mapping
 
-            self.db_handler = db_handler # SobriquetDB 实例 (SQLite)
+            self.db_handler = db_handler 
             if not self.db_handler or not self.db_handler.is_available():
                 logger.error(f"SobriquetDB 初始化失败或不可用，功能受限。")
                 self.is_enabled = False
             else:
                 logger.info(f"SobriquetDB (SQLite, path: {self.db_handler.db_path}) 初始化成功。")
             
-            self.profile_manager = profile_manager_instance # ProfileManager 实例
+            self.profile_manager = profile_manager_instance 
             if not self.profile_manager or not self.profile_manager.is_available():
                 logger.error(f"ProfileManager (SQLite) 不可用，功能将受限。")
                 self.is_enabled = False
             
-            # LLM 映射器 - 现在使用模拟函数
             self.llm_mapper_fn = mock_llm_generate_response 
-            # 检查 LLM 配置（虽然我们用的是 mock，但可以保留逻辑以备将来切换）
             if self.is_enabled:
-                model_config_dict = global_config.model.get("sobriquet_mapping")
-                if model_config_dict and model_config_dict.get("name"): # 检查配置是否存在
-                    logger.info(f"绰号映射 LLM (模拟) 配置存在: {model_config_dict.get('name')}.")
+                # global_config.model is a dict, global_config.model.get("key") is correct
+                model_config_obj = global_config.model.get("sobriquet_mapping") 
+                if model_config_obj and model_config_obj.get("name"): 
+                    logger.info(f"绰号映射 LLM (模拟) 配置存在: {model_config_obj.get('name')}.")
                 else:
                     logger.warning("绰号映射 LLM 配置无效或缺失 'name'，功能禁用。")
                     self.is_enabled = False
             
-            # 模拟聊天记录历史的提供者 (用于 trigger_sobriquet_analysis)
             self.chat_history_provider = chat_history_provider if chat_history_provider else {}
-
 
             self.queue_max_size = global_config.profile.sobriquet_queue_max_size
             self.sobriquet_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_max_size)
@@ -125,7 +113,6 @@ class SobriquetManager:
             self._initialized = True
             logger.info(f"SobriquetManager 初始化完成。当前启用状态: {self.is_enabled}")
 
-    # start_processor, stop_processor, _add_to_queue, _run_processor_in_thread, _processing_loop 保持不变
     def start_processor(self):
         if not self.is_enabled: logger.info("绰号处理功能已禁用，处理器未启动。"); return
         max_sobriquets_cfg = global_config.profile.max_sobriquets_in_prompt
@@ -141,13 +128,12 @@ class SobriquetManager:
     def stop_processor(self):
         if self._sobriquet_thread and self._sobriquet_thread.is_alive():
             logger.info("正在停止绰号处理器线程..."); self._stop_event.set()
-            # 尝试唤醒队列，以便循环可以检查 _stop_event
             try: self.sobriquet_queue.put_nowait(None) 
-            except asyncio.QueueFull: pass # 如果满了，它最终会处理现有项目并停止
+            except asyncio.QueueFull: pass 
             except Exception: pass
 
             try:
-                self._sobriquet_thread.join(timeout=max(2, self.sleep_interval * 2)) # 等待至少2秒或2个处理间隔
+                self._sobriquet_thread.join(timeout=max(2, self.sleep_interval * 2)) 
                 if self._sobriquet_thread.is_alive(): logger.warning("绰号处理器线程在超时后仍未停止。")
             except Exception as e: logger.error(f"停止绰号处理器线程时出错: {e}", exc_info=True)
             finally:
@@ -157,7 +143,6 @@ class SobriquetManager:
 
     async def _add_to_queue(self, item: tuple, platform: str, group_id: str):
         try:
-            # 如果 item 是 None (来自 stop_processor), 也放入队列以帮助终止循环
             if self._stop_event.is_set() and item is not None:
                  logger.info(f"停止事件已设置，不再添加新项目到队列: {platform}-{group_id}")
                  return
@@ -171,8 +156,9 @@ class SobriquetManager:
         self, anchor_message: MockMessageRecv, bot_reply: List[str], chat_stream: Optional[MockChatStream] = None
     ):
         if not self.is_enabled: return
-        analysis_probability = global_config.profile.get("sobriquet_analysis_probability", 1.0)
-        if not (0 <= analysis_probability <= 1.0): analysis_probability = 1.0 # 确保概率在有效范围内
+        # 修改: 直接访问属性
+        analysis_probability = global_config.profile.sobriquet_analysis_probability
+        if not (0 <= analysis_probability <= 1.0): analysis_probability = 1.0 
         if random.random() > analysis_probability: logger.debug(f"跳过绰号分析：概率未命中 ({analysis_probability})。"); return
 
         current_chat_stream = chat_stream or anchor_message.chat_stream
@@ -181,13 +167,13 @@ class SobriquetManager:
         
         log_prefix = f"[{current_chat_stream.stream_id}]"
         try:
+            # 这个已经是直接访问，是正确的
             history_limit = global_config.profile.sobriquet_analysis_history_limit
-            # 使用模拟的 get_raw_msg_before_timestamp_with_chat，它需要 chat_history_provider
             history_messages = get_raw_msg_before_timestamp_with_chat(
                 current_chat_stream.stream_id, 
                 time.time(), 
                 history_limit,
-                self.chat_history_provider # 传入模拟历史记录
+                self.chat_history_provider 
             )
             chat_history_str = await build_readable_messages(history_messages, True, False, "relative", 0.0, False)
             bot_reply_str = " ".join(bot_reply) if bot_reply else ""
@@ -198,7 +184,6 @@ class SobriquetManager:
             user_name_map = {} 
             if user_ids_in_history:
                 try:
-                    # 使用模拟的 relationship_manager
                     names_data = await mock_relationship_manager.get_person_names_batch(platform, list(user_ids_in_history))
                 except Exception as e:
                     logger.error(f"{log_prefix} 批量获取 person_name (模拟) 出错: {e}", exc_info=True); names_data = {}
@@ -206,14 +191,14 @@ class SobriquetManager:
                 for uid_str in user_ids_in_history:
                     if uid_str in names_data and names_data[uid_str]: 
                         user_name_map[uid_str] = names_data[uid_str]
-                    else: # Fallback logic from original code
+                    else: 
                         latest_display_name = next((m["user_info"].get("user_nickname") or m["user_info"].get("user_cardname") 
                                                    for m in reversed(history_messages) 
                                                    if str(m["user_info"].get("user_id")) == uid_str and 
                                                       (m["user_info"].get("user_nickname") or m["user_info"].get("user_cardname"))), None)
                         bot_uid_str = str(global_config.bot.qq_account)
                         user_name_map[uid_str] = (latest_display_name or f"{global_config.bot.nickname}(你)") if uid_str == bot_uid_str \
-                                               else (latest_display_name or f"用户({uid_str[-4:] if len(uid_str) >=4 else uid_str})") # 避免 uid 过短导致索引错误
+                                               else (latest_display_name or f"用户({uid_str[-4:] if len(uid_str) >=4 else uid_str})") 
             
             item = (chat_history_str, bot_reply_str, platform, group_id, user_name_map)
             await self._add_to_queue(item, platform, group_id)
@@ -230,21 +215,20 @@ class SobriquetManager:
             platform = chat_stream.platform
             user_ids_in_context = {str(msg["user_info"]["user_id"]) for msg in message_list_before_now if msg.get("user_info", {}).get("user_id")}
             
-            if not user_ids_in_context: # 如果当前消息列表为空，尝试从 chat_stream 获取最近发言者
-                limit = global_config.profile.get("recent_speakers_limit_for_injection", 5)
-                # 确保 get_recent_speakers 返回的是包含 "user_id" 键的字典列表
+            if not user_ids_in_context: 
+                # 修改: 直接访问属性
+                limit = global_config.profile.recent_speakers_limit_for_injection
                 recent_speakers_data = chat_stream.get_recent_speakers(limit=limit)
                 user_ids_in_context.update(str(s["user_id"]) for s in recent_speakers_data if s.get("user_id"))
 
             if not user_ids_in_context: logger.debug(f"{log_prefix} 无上下文用户用于绰号注入。"); return ""
             
-            # 调用 ProfileManager (已适配 SQLite)
             data_for_prompt = await self.profile_manager.get_users_group_sobriquets_for_prompt_injection_data(
                 platform, list(user_ids_in_context), group_id
             )
             if data_for_prompt:
-                selected = select_sobriquets_for_prompt(data_for_prompt) # sobriquet_utils
-                injection_str = format_sobriquet_prompt_injection(selected) # sobriquet_utils
+                selected = select_sobriquets_for_prompt(data_for_prompt) 
+                injection_str = format_sobriquet_prompt_injection(selected) 
                 if injection_str: logger.debug(f"{log_prefix} 生成绰号注入 (部分):\n{injection_str.strip()[:200]}...")
                 return injection_str
             else: logger.debug(f"{log_prefix} 未从 ProfileManager 获取到绰号数据。"); return ""
@@ -263,7 +247,6 @@ class SobriquetManager:
         if not self.db_handler or not self.db_handler.is_available(): 
             logger.error(f"{log_prefix} SobriquetDB (SQLite) 不可用。"); return
 
-        # 调用模拟的 LLM 分析函数
         analysis_result = await self._call_llm_for_analysis(chat_history_str, bot_reply, user_name_map)
 
         if analysis_result.get("is_exist") and analysis_result.get("data"):
@@ -276,22 +259,17 @@ class SobriquetManager:
                     continue
                 
                 try:
-                    # 1. 获取 person_info_pid (来自模拟的 person_info_manager)
                     person_info_pid = person_info_manager.get_person_id(platform, platform_user_id_str)
                     if not person_info_pid:
                         logger.error(f"{log_prefix} 无法为 platform='{platform}', uid='{platform_user_id_str}' 获取 person_info_pid (模拟)。")
                         continue
                     
-                    # 2. 基于 person_info_pid 生成 profile_info 文档的 _id
-                    #    使用 self.profile_manager (已适配 SQLite)
                     profile_doc_id = self.profile_manager.generate_profile_document_id(person_info_pid)
                     
-                    # 3. 确保 profile_info 文档存在 (通过 self.db_handler - SobriquetDB SQLite)
                     self.db_handler.ensure_profile_document_exists(
                         profile_doc_id, person_info_pid, platform, platform_user_id_str
                     )
                     
-                    # 4. 更新绰号计数 (通过 self.db_handler - SobriquetDB SQLite)
                     self.db_handler.update_group_sobriquet_count(
                         profile_doc_id, platform, group_id_str, sobriquet_name
                     )
@@ -309,17 +287,14 @@ class SobriquetManager:
         if not self.llm_mapper_fn: 
             logger.error("LLM映射函数 (模拟) 未初始化。"); return {"is_exist": False}
         
-        prompt = _build_mapping_prompt(chat_history_str, bot_reply, user_name_map) # sobriquet_mapper
+        prompt = _build_mapping_prompt(chat_history_str, bot_reply, user_name_map) 
         
         try:
-            # 调用模拟的 LLM 函数
-            # 假设它返回 (response_content_str, model_name, finish_reason)
-            response_content, _, _ = self.llm_mapper_fn(prompt) # 使用 mock_llm_generate_response
+            response_content, _, _ = self.llm_mapper_fn(prompt) 
             
             if not response_content: 
                 logger.warning("LLM (模拟) 返回空绰号映射内容。"); return {"is_exist": False}
             
-            # JSON 解析逻辑 (与原版一致)
             json_str = ""; stripped_content = response_content.strip()
             m_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped_content, re.DOTALL)
             if m_match: json_str = m_match.group(1).strip()
@@ -342,7 +317,7 @@ class SobriquetManager:
             if is_exist:
                 data = result.get("data")
                 if isinstance(data, dict) and data:
-                    filtered = self._filter_llm_results(data, user_name_map) # 使用相同的过滤逻辑
+                    filtered = self._filter_llm_results(data, user_name_map) 
                     if not filtered: logger.info("所有绰号映射均被过滤。"); return {"is_exist": False, "data": {}}
                     logger.info(f"过滤后绰号映射: {filtered}"); return {"is_exist": True, "data": filtered}
                 logger.warning(f"LLM (模拟) is_exist=True 但 data 无效: {data}"); return {"is_exist": False, "data": {}}
@@ -352,12 +327,12 @@ class SobriquetManager:
             logger.error(f"LLM (模拟) 调用或处理中意外错误: {e}", exc_info=True); return {"is_exist": False, "data": {}}
 
     def _filter_llm_results(self, original_data: Dict[str, str], user_name_map_for_prompt: Dict[str, str]) -> Dict[str, str]:
-        # 此方法与原版一致，用于过滤LLM结果
         filtered = {}; bot_qq = str(global_config.bot.qq_account) if global_config.bot.qq_account else None
-        min_l, max_l = global_config.profile.get("sobriquet_min_length",1), global_config.profile.get("sobriquet_max_length",15)
+        # 修改: 直接访问属性
+        min_l, max_l = global_config.profile.sobriquet_min_length, global_config.profile.sobriquet_max_length
+        
         for uid, s_name in original_data.items():
             if not isinstance(uid, str) or not isinstance(s_name, str): continue
-            # 检查是否是机器人自己 (基于 user_name_map 中的 "(你)" 标记 或 机器人昵称)
             user_display_name_in_map = user_name_map_for_prompt.get(uid, "")
             if bot_qq and uid == bot_qq and \
                ("(你)" in user_display_name_in_map or user_display_name_in_map == global_config.bot.nickname):
@@ -371,24 +346,21 @@ class SobriquetManager:
         return filtered
 
     def _run_processor_in_thread(self):
-        # 此方法与原版一致
         tid = threading.get_ident(); logger.info(f"绰号处理器线程启动 (ID: {tid})...")
-        loop = None # 初始化 loop 变量
+        loop = None 
         try:
             loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
             logger.info(f"(ID: {tid}) Asyncio事件循环已创建设置。")
-            run_async_loop(loop, self._processing_loop()) # run_async_loop 会处理 loop 的关闭
+            run_async_loop(loop, self._processing_loop()) 
         except Exception as e: 
             logger.error(f"绰号处理器线程(ID:{tid})顶层错误: {e}", exc_info=True)
         finally: 
-            if loop and not loop.is_closed(): # 确保在意外退出时也尝试关闭 loop
+            if loop and not loop.is_closed(): 
                 logger.warning(f"绰号处理器线程(ID:{tid})意外结束，尝试关闭事件循环。")
                 try:
                     if loop.is_running(): loop.stop()
-                    # 执行 loop.shutdown_asyncgens() 和 loop.close()
-                    # run_async_loop 应该已经处理了，但作为后备
                     all_tasks = asyncio.all_tasks(loop)
-                    tasks_to_cancel = [task for task in all_tasks if task is not asyncio.current_task(loop)] # 排除当前任务（如果存在）
+                    tasks_to_cancel = [task for task in all_tasks if task is not asyncio.current_task(loop)] 
                     if tasks_to_cancel:
                         for task in tasks_to_cancel: task.cancel()
                         loop.run_until_complete(asyncio.gather(*tasks_to_cancel, return_exceptions=True))
@@ -402,33 +374,31 @@ class SobriquetManager:
 
 
     async def _processing_loop(self):
-        # 此方法与原版一致，但增加了对 None item 的处理 (用于优雅停止)
         logger.info("绰号异步处理循环已启动。")
         while not self._stop_event.is_set():
             try:
                 item = await asyncio.wait_for(self.sobriquet_queue.get(), timeout=self.sleep_interval)
-                if item is None: # 收到 None 表示可能是停止信号
+                if item is None: 
                     logger.info("处理循环收到 None item, 准备退出。")
                     self.sobriquet_queue.task_done()
                     break 
-                if self._stop_event.is_set(): # 再次检查停止事件
+                if self._stop_event.is_set(): 
                     logger.info("处理循环在获取项目后检测到停止事件，退出。")
-                    self.sobriquet_queue.task_done() # 标记任务完成，即使未处理
+                    self.sobriquet_queue.task_done() 
                     break
 
                 await self._analyze_and_update_sobriquets(item)
                 self.sobriquet_queue.task_done()
             except asyncio.TimeoutError: 
-                continue # 超时是正常的，继续检查停止事件
+                continue 
             except asyncio.CancelledError: 
                 logger.info("绰号处理循环被取消。"); break
             except Exception as e:
                 logger.error(f"绰号处理循环处理项目时出错: {e}", exc_info=True)
-                # 避免在错误后立即重试，稍微等待一下
                 if not self._stop_event.is_set(): 
-                    await asyncio.sleep(global_config.profile.get("error_sleep_interval", 5))
+                    # 修改: 直接访问属性
+                    await asyncio.sleep(global_config.profile.error_sleep_interval)
         
-        # 清理队列中剩余的项目（如果需要）
         while not self.sobriquet_queue.empty():
             try:
                 item = self.sobriquet_queue.get_nowait()
@@ -438,5 +408,3 @@ class SobriquetManager:
                 break
         logger.info("绰号异步处理循环已结束。")
 
-# 全局实例将在 main_test.py 中正确初始化
-# sobriquet_manager = SobriquetManager()
