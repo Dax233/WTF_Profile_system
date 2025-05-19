@@ -34,9 +34,9 @@ async def run_test_scenario():
 
 
     db_file = global_config.profile.db_path
-    if os.path.exists(db_file):
-        logger.info(f"删除旧的数据库文件: {db_file}")
-        os.remove(db_file)
+    # if os.path.exists(db_file):
+    #     logger.info(f"删除旧的数据库文件: {db_file}")
+    #     os.remove(db_file)
 
     sobriquet_db = ProfileDB(db_path=db_file)
     logger.info(f"SobriquetDB (SQLite) 初始化完成，数据库文件: {sobriquet_db.db_path}")
@@ -76,7 +76,7 @@ async def run_test_scenario():
 
     chat_stream1.add_message(user_id1, "大家好，我是张三！")
     await asyncio.sleep(0.1) 
-    chat_stream1.add_message(user_id2, f"你好张三，我是李四。听说 {user_id1} 也叫“老张”？") 
+    chat_stream1.add_message(user_id2, f"你好张三，我是李四。听说 {user_id1} 也叫“阿张”？") 
     await asyncio.sleep(0.1)
     
     bot_reply_text = [f"明白了，李四。我会记住“老张”这个称呼的。"]
@@ -85,7 +85,7 @@ async def run_test_scenario():
     llm_response_for_user1_laozhang = {
         "is_exist": True,
         "data": {
-            user_id1: "老张" 
+            user_id1: "阿张" 
         }
     }
     set_mock_llm_response(identifier=user_id1, response_json_string=json.dumps(llm_response_for_user1_laozhang))
