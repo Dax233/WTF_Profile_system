@@ -7,7 +7,7 @@ from stubs.mock_config import global_config
 from stubs.mock_dependencies import get_logger, person_info_manager, relationship_manager, MockDatabase
 
 # 导入 SQLite 数据库处理器
-from profile.sobriquet.sobriquet_db import SobriquetDB
+from profile.profile_db import ProfileDB
 
 
 logger = get_logger("ProfileManager")
@@ -20,14 +20,14 @@ class ProfileManager:
     此版本适配 SQLite。
     """
 
-    def __init__(self, db_path: Optional[str] = None, sobriquet_db_instance: Optional[SobriquetDB] = None):
+    def __init__(self, db_path: Optional[str] = None, sobriquet_db_instance: Optional[ProfileDB] = None):
         # 使用 stubs 中的配置
         self.db_path = db_path or global_config.profile.db_path
         
         if sobriquet_db_instance:
             self.db_handler = sobriquet_db_instance
         else:
-            self.db_handler = SobriquetDB(self.db_path) # ProfileManager 使用 SobriquetDB 来访问 profile_info
+            self.db_handler = ProfileDB(self.db_path) # ProfileManager 使用 SobriquetDB 来访问 profile_info
 
         # self.profile_collection 模拟 MongoDB collection 对象，通过 MockDatabase 适配 SobriquetDB
         # 这使得 get_users_group_sobriquets_for_prompt_injection_data 中的 .find() 调用可以工作

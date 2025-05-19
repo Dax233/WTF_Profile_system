@@ -21,7 +21,7 @@ from stubs.mock_dependencies import (
 from stubs.mock_dependencies import relationship_manager as mock_relationship_manager
 
 
-from .sobriquet_db import SobriquetDB
+from ..profile_db import ProfileDB
 from .sobriquet_mapper import _build_mapping_prompt
 from .sobriquet_utils import select_sobriquets_for_prompt, format_sobriquet_prompt_injection
 
@@ -71,7 +71,7 @@ class SobriquetManager:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, db_handler: SobriquetDB, profile_manager_instance: Any, chat_history_provider: Optional[Dict[str, Any]] = None):
+    def __init__(self, db_handler: ProfileDB, profile_manager_instance: Any, chat_history_provider: Optional[Dict[str, Any]] = None):
         if hasattr(self, "_initialized") and self._initialized:
             return
         with self._lock:

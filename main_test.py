@@ -7,7 +7,7 @@ import sqlite3
 import logging
 
 # 导入修改后的管理器和数据库处理器
-from profile.sobriquet.sobriquet_db import SobriquetDB
+from profile.profile_db import ProfileDB
 from profile.profile_manager import ProfileManager
 from profile.sobriquet.sobriquet_manager import SobriquetManager
 
@@ -38,7 +38,7 @@ async def run_test_scenario():
         logger.info(f"删除旧的数据库文件: {db_file}")
         os.remove(db_file)
 
-    sobriquet_db = SobriquetDB(db_path=db_file)
+    sobriquet_db = ProfileDB(db_path=db_file)
     logger.info(f"SobriquetDB (SQLite) 初始化完成，数据库文件: {sobriquet_db.db_path}")
 
     profile_manager = ProfileManager(sobriquet_db_instance=sobriquet_db)
@@ -194,7 +194,7 @@ async def run_test_scenario():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logging.getLogger("asyncio").setLevel(logging.INFO) 
     
     asyncio.run(run_test_scenario())

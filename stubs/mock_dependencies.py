@@ -24,7 +24,7 @@ class MockDbCollection:
             ids = query["_id"]["$in"]
             results = []
             for doc_id in ids:
-                doc = await self.db_handler.get_profile_document_by_id_for_find(doc_id, projection)
+                doc = await self.db_handler.get_profile_document_for_find_projection(doc_id, projection)
                 if doc:
                     results.append(doc)
             return results
