@@ -8,12 +8,7 @@ from typing import List, Dict, Any, Optional
 # --- 模拟 Logger ---
 def get_logger(name):
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG) # 默认级别可以设为 DEBUG，方便调试
-    if not logger.handlers: # 避免重复添加 handler
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+    # 由 main_test.py 中的 basicConfig 统一处理 Handler 和基本级别
     return logger
 
 # --- 模拟 src.common.database ---
@@ -75,10 +70,10 @@ class MockRelationshipManager:
 
     async def get_person_names_batch(self, platform: str, user_ids: List[str]) -> Dict[str, str]:
         results = {}
-        for user_id in user_ids:
-            name = self.user_to_name_map.get((platform, str(user_id)))
+        for user_id_str in user_ids: # 确保是字符串
+            name = self.user_to_name_map.get((platform, str(user_id_str)))
             if name:
-                results[str(user_id)] = name
+                results[str(user_id_str)] = name
         self.logger.debug(f"get_person_names_batch({platform}, {user_ids}) -> {results}")
         return results
     
@@ -89,15 +84,21 @@ class MockRelationshipManager:
 relationship_manager = MockRelationshipManager()
 
 # --- 模拟 LLMRequest 和 LLM 调用 ---
-MOCK_LLM_RESPONSES = {} 
+MOCK_LLM_RESPONSES: Dict[str, str] = {} 
 
 def mock_llm_generate_response(prompt: str, context_user_id: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[str]]:
     logger = get_logger("mock_llm_generate_response")
     logger.debug(f"Mock LLM called with prompt (first 100 chars): {prompt[:100]}...")
-    for key, response_data in MOCK_LLM_RESPONSES.items():
+    
+    # --- 修改点：逆序遍历 MOCK_LLM_RESPONSES 的键 ---
+    # 这样，最新设置的、且其 identifier 存在于 prompt 中的模拟响应将被优先使用。
+    # 这依赖于 Python 3.7+ 字典保持插入顺序的特性。
+    for key in reversed(list(MOCK_LLM_RESPONSES.keys())):
+        response_data = MOCK_LLM_RESPONSES[key]
         if key in prompt: 
-            logger.info(f"Found mock response for key '{key}' in prompt.")
-            return response_data, "mock_model_name", "mock_finish_reason"
+            logger.info(f"Found mock response for key '{key}' (searched in reverse) in prompt.")
+            return response_data, "mock_model_name", "mock_finish_reason_reversed_match"
+            
     default_response = """
     {
         "is_exist": false
@@ -127,10 +128,9 @@ class MockChatStream:
         self.platform = platform
         self.group_info = MockGroupInfo(group_id)
         self.messages: List[Dict[str, Any]] = [] 
-        self.recent_speakers_list: List[Dict[str, Any]] = [] # 确保是字典列表
+        self.recent_speakers_list: List[Dict[str, Any]] = []
 
     def add_message(self, user_id: str, text: str, timestamp: Optional[float] = None):
-        # 准备消息字典
         msg_timestamp = timestamp or time.time()
         msg = {
             "user_info": {"user_id": str(user_id), "user_nickname": f"Nick-{user_id}", "user_cardname": f"Card-{user_id}"},
@@ -139,34 +139,21 @@ class MockChatStream:
         }
         self.messages.append(msg)
 
-        # --- 更新最近发言者列表 (recent_speakers_list) ---
-        # 1. 从列表中移除该用户的旧条目（如果存在）
-        #    我们期望 recent_speakers_list 中的每个元素都是一个字典，例如：{'user_id': 'some_id', 'timestamp': 123.45}
         self.recent_speakers_list = [
             speaker_info for speaker_info in self.recent_speakers_list 
             if speaker_info.get("user_id") != str(user_id)
         ]
-        
-        # 2. 添加/更新该用户为最新发言者（作为字典）
         self.recent_speakers_list.append({"user_id": str(user_id), "timestamp": msg_timestamp})
-        
-        # 3. 按时间戳降序排序 (最新的在前)
-        #    现在列表中的所有元素都应该是字典，所以 x["timestamp"] 可以正常工作
         self.recent_speakers_list.sort(key=lambda x: x["timestamp"], reverse=True)
-        # --- 更新结束 ---
 
     def get_recent_speakers(self, limit: int = 5) -> List[Dict[str, Any]]:
-        # 返回最近发言者的列表副本（字典列表）
         return self.recent_speakers_list[:limit]
 
 class MockMessageRecv:
     def __init__(self, chat_stream: MockChatStream, user_id: str, text: str):
         self.chat_stream = chat_stream
-        self.user_info = MockUserInfo(user_id) # user_info 应该是 MockUserInfo 实例
+        self.user_info = MockUserInfo(user_id) 
         self.text = text 
-
-# 全局消息存储，按 stream_id 组织
-# chat_streams_history: Dict[str, MockChatStream] = {} # 在 main_test.py 中管理
 
 def get_raw_msg_before_timestamp_with_chat(stream_id: str, timestamp: float, limit: int, chat_streams_history: Dict[str, MockChatStream]) -> List[Dict]:
     logger = get_logger("get_raw_msg_before_timestamp_with_chat")
@@ -175,8 +162,8 @@ def get_raw_msg_before_timestamp_with_chat(stream_id: str, timestamp: float, lim
         relevant_messages = [msg for msg in stream.messages if msg["timestamp"] < timestamp]
         relevant_messages.sort(key=lambda x: x["timestamp"], reverse=True) 
         logger.debug(f"Found {len(relevant_messages)} messages for stream {stream_id} before {timestamp}. Returning last {limit}.")
-        return relevant_messages[:limit] # 返回最新的 limit 条
-    logger.warning(f"Stream {stream_id} not found in chat_streams_history.")
+        return relevant_messages[:limit] 
+    logger.warning(f"Stream {stream_id} not found in chat_streams_history for history lookup.")
     return []
 
 async def build_readable_messages(
@@ -189,15 +176,7 @@ async def build_readable_messages(
 ) -> str:
     logger = get_logger("build_readable_messages")
     readable_parts = []
-    # messages 传入时已经是按时间倒序的 (新->旧), get_raw_msg_before_timestamp_with_chat 返回的就是这样的
-    # 所以这里直接遍历，或者在 get_raw_msg_before_timestamp_with_chat 返回前反转一次以符合“历史记录”的直觉
-    # 当前 build_readable_messages 假设 messages 是按时间顺序 (旧->新) 的，所以它内部会 reversed(messages)
-    # 我们让 get_raw_msg_before_timestamp_with_chat 返回的是 新->旧，所以这里不需要再反转
-    
-    # 为了与原始 build_readable_messages 行为一致 (它期望消息是时间顺序，然后它反转)
-    # 我们这里先反转一下 get_raw_msg_before_timestamp_with_chat 返回的列表
-    
-    for msg in reversed(messages): # 假设 messages 是 新->旧，反转后是 旧->新
+    for msg in reversed(messages): 
         user_id = msg.get("user_info", {}).get("user_id", "UnknownUser")
         name_to_display = msg.get("user_info", {}).get("user_cardname") or \
                           msg.get("user_info", {}).get("user_nickname") or \
@@ -206,12 +185,12 @@ async def build_readable_messages(
         content = msg.get("message_content", "")
         ts = msg.get("timestamp", 0)
         time_str = ""
-        current_time = time.time() + time_offset_seconds # 考虑偏移
+        current_time = time.time() + time_offset_seconds
         if time_format_type == "absolute":
             time_str = f"({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}) "
         elif time_format_type == "relative":
             relative_time = current_time - ts
-            if relative_time < 0: relative_time = 0 # 避免负数 (例如时间戳来自未来)
+            if relative_time < 0: relative_time = 0 
             
             if relative_time < 60:
                 time_str = f"({int(relative_time)}秒前) "

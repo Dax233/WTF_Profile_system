@@ -71,7 +71,7 @@ class SobriquetManager:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, db_handler: SobriquetDB, profile_manager_instance: Any, chat_history_provider: Optional[Dict] = None): # Any for ProfileManager to avoid circular type hint
+    def __init__(self, db_handler: SobriquetDB, profile_manager_instance: Any, chat_history_provider: Optional[Dict[str, Any]] = None):
         if hasattr(self, "_initialized") and self._initialized:
             return
         with self._lock:
@@ -95,7 +95,6 @@ class SobriquetManager:
             
             self.llm_mapper_fn = mock_llm_generate_response 
             if self.is_enabled:
-                # global_config.model is a dict, global_config.model.get("key") is correct
                 model_config_obj = global_config.model.get("sobriquet_mapping") 
                 if model_config_obj and model_config_obj.get("name"): 
                     logger.info(f"绰号映射 LLM (模拟) 配置存在: {model_config_obj.get('name')}.")
@@ -103,7 +102,9 @@ class SobriquetManager:
                     logger.warning("绰号映射 LLM 配置无效或缺失 'name'，功能禁用。")
                     self.is_enabled = False
             
-            self.chat_history_provider = chat_history_provider if chat_history_provider else {}
+            self.chat_history_provider = chat_history_provider if chat_history_provider is not None else {}
+            logger.debug(f"SobriquetManager initialized with chat_history_provider (id: {id(self.chat_history_provider)}), keys: {list(self.chat_history_provider.keys())}")
+
 
             self.queue_max_size = global_config.profile.sobriquet_queue_max_size
             self.sobriquet_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_max_size)
@@ -156,7 +157,6 @@ class SobriquetManager:
         self, anchor_message: MockMessageRecv, bot_reply: List[str], chat_stream: Optional[MockChatStream] = None
     ):
         if not self.is_enabled: return
-        # 修改: 直接访问属性
         analysis_probability = global_config.profile.sobriquet_analysis_probability
         if not (0 <= analysis_probability <= 1.0): analysis_probability = 1.0 
         if random.random() > analysis_probability: logger.debug(f"跳过绰号分析：概率未命中 ({analysis_probability})。"); return
@@ -167,8 +167,11 @@ class SobriquetManager:
         
         log_prefix = f"[{current_chat_stream.stream_id}]"
         try:
-            # 这个已经是直接访问，是正确的
             history_limit = global_config.profile.sobriquet_analysis_history_limit
+            
+            logger.debug(f"{log_prefix} Attempting to get history. Chat history provider (id: {id(self.chat_history_provider)}) keys: {list(self.chat_history_provider.keys())}")
+            logger.debug(f"{log_prefix} Current stream ID for history lookup: {current_chat_stream.stream_id}")
+
             history_messages = get_raw_msg_before_timestamp_with_chat(
                 current_chat_stream.stream_id, 
                 time.time(), 
@@ -216,7 +219,6 @@ class SobriquetManager:
             user_ids_in_context = {str(msg["user_info"]["user_id"]) for msg in message_list_before_now if msg.get("user_info", {}).get("user_id")}
             
             if not user_ids_in_context: 
-                # 修改: 直接访问属性
                 limit = global_config.profile.recent_speakers_limit_for_injection
                 recent_speakers_data = chat_stream.get_recent_speakers(limit=limit)
                 user_ids_in_context.update(str(s["user_id"]) for s in recent_speakers_data if s.get("user_id"))
@@ -295,17 +297,35 @@ class SobriquetManager:
             if not response_content: 
                 logger.warning("LLM (模拟) 返回空绰号映射内容。"); return {"is_exist": False}
             
-            json_str = ""; stripped_content = response_content.strip()
-            m_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped_content, re.DOTALL)
-            if m_match: json_str = m_match.group(1).strip()
-            else:
-                b_match = re.search(r"(\{.*?\})", stripped_content, re.DOTALL)
-                if b_match: json_str = b_match.group(1).strip()
-                else: logger.warning(f"LLM (模拟) 响应不含有效JSON。响应(首200): {stripped_content[:200]}"); return {"is_exist": False}
+            stripped_content = response_content.strip()
+            json_str = ""
             
-            try: result = json.loads(json_str)
+            # 尝试从 Markdown 代码块中提取 JSON
+            m_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped_content, re.DOTALL)
+            if m_match:
+                json_str = m_match.group(1).strip()
+                logger.debug("从 Markdown 代码块中提取 JSON。")
+            # 如果没有 Markdown，并且字符串看起来像一个 JSON 对象，则直接使用
+            elif stripped_content.startswith("{") and stripped_content.endswith("}"):
+                json_str = stripped_content
+                logger.debug("假设剥离后的内容本身就是 JSON 字符串。")
+            else:
+                # 作为后备，如果上述条件都不满足，尝试原始的更广泛的 regex 匹配（尽管对于我们的模拟情况，这不应该被触发）
+                b_match = re.search(r"(\{.*?\})", stripped_content, re.DOTALL)
+                if b_match:
+                    json_str = b_match.group(1).strip()
+                    logger.debug("使用通用的花括号匹配 Regex 提取 JSON。")
+                else:
+                    logger.warning(f"LLM (模拟) 响应不含有效JSON。响应(首200): {stripped_content[:200]}")
+                    return {"is_exist": False}
+
+            logger.debug(f"将要解析的 JSON 字符串 (repr): {repr(json_str)}")
+            logger.debug(f"将要解析的 JSON 字符串 (直接): {json_str}")
+
+            try:
+                result = json.loads(json_str)
             except json.JSONDecodeError as je: 
-                logger.error(f"解析LLM (模拟) JSON失败: {je}\nJSON str: {json_str}\n原始响应(首500): {stripped_content[:500]}"); return {"is_exist": False}
+                logger.error(f"解析LLM (模拟) JSON失败: {je}\nJSON str (repr): {repr(json_str)}\n原始响应(首500): {stripped_content[:500]}"); return {"is_exist": False}
             
             if not isinstance(result, dict): 
                 logger.warning(f"LLM (模拟) 响应非字典。类型: {type(result)}"); return {"is_exist": False}
@@ -328,7 +348,6 @@ class SobriquetManager:
 
     def _filter_llm_results(self, original_data: Dict[str, str], user_name_map_for_prompt: Dict[str, str]) -> Dict[str, str]:
         filtered = {}; bot_qq = str(global_config.bot.qq_account) if global_config.bot.qq_account else None
-        # 修改: 直接访问属性
         min_l, max_l = global_config.profile.sobriquet_min_length, global_config.profile.sobriquet_max_length
         
         for uid, s_name in original_data.items():
@@ -396,7 +415,6 @@ class SobriquetManager:
             except Exception as e:
                 logger.error(f"绰号处理循环处理项目时出错: {e}", exc_info=True)
                 if not self._stop_event.is_set(): 
-                    # 修改: 直接访问属性
                     await asyncio.sleep(global_config.profile.error_sleep_interval)
         
         while not self.sobriquet_queue.empty():
@@ -407,4 +425,3 @@ class SobriquetManager:
             except asyncio.QueueEmpty:
                 break
         logger.info("绰号异步处理循环已结束。")
-

@@ -30,7 +30,7 @@ class ModelConfig:
 
 class SecurityConfig:
     def __init__(self):
-        self.profile_id_salt = "test_salt_for_profile_id"
+        self.profile_id_salt = "test_test_salt_for_profile_id"
 
 class BotConfig:
     def __init__(self):
