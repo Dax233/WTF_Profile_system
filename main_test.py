@@ -103,7 +103,7 @@ async def run_test_scenario():
     logger.info(f"触发对用户 {user_id2} 消息的绰号分析...")
     await sobriquet_manager_instance.trigger_sobriquet_analysis(anchor_msg_user2, bot_reply_text, chat_stream=chat_stream1)
     
-    # --- 增加等待时间 ---
+    # --- 增加等待时间以确保后台数据库操作完成 ---
     logger.info("等待后台绰号处理 (场景1, 3秒)...") 
     await asyncio.sleep(3) 
 
@@ -144,7 +144,7 @@ async def run_test_scenario():
                 logger.error(f"失败 (Prompt Export): current_platform_context 验证失败。得到: {ctx}")
 
             summary = user1_exported_profile.get("all_known_sobriquets_summary", "")
-            if "老张" in summary:
+            if "老张" in summary: # 验证是否包含 "老张"
                 logger.info(f"成功 (Prompt Export): all_known_sobriquets_summary 包含 '老张'。摘要: {summary}")
             else:
                 logger.error(f"失败 (Prompt Export): all_known_sobriquets_summary 未包含 '老张'。摘要: {summary}")
@@ -158,6 +158,7 @@ async def run_test_scenario():
 
     logger.info("-" * 30 + " 开始场景 2: 李四 ('老李') " + "-" * 30)
     if npid_user2:
+        # 确保文档存在，并为 user_id2 (李四) 添加另一个群组的绰号，以测试 all_known_sobriquets_summary
         await profile_db_instance.ensure_profile_document_exists(npid_user2, pid_user2, platform, user_id2)
         await profile_db_instance.update_group_sobriquet_count(npid_user2, platform, group_id2, "李哥") 
         logger.info(f"为 NPID {npid_user2} 在群组 {group_id2} 添加了初始绰号 '李哥'")
@@ -207,7 +208,7 @@ async def run_test_scenario():
             natural_person_ids_in_context=[npid_user1, npid_user2], 
             current_platform=platform,
             platform_user_id_to_npid_map=platform_user_id_to_npid_map_scene2,
-            current_group_id=group_id1 
+            current_group_id=group_id1 # 当前上下文在 group101
         )
         
         user2_exported_profile = prompt_export_data_scene2.get(npid_user2)
@@ -221,6 +222,7 @@ async def run_test_scenario():
 
             summary_u2 = user2_exported_profile.get("all_known_sobriquets_summary", "")
             # --- 修正断言：all_known_sobriquets_summary 在 group_id1 上下文中只应包含 "老李" ---
+            # "李哥" 是在 group_id2 中的，不应该出现在 current_group_id=group_id1 的摘要中
             if "老李" in summary_u2 and "李哥" not in summary_u2: 
                 logger.info(f"成功 (Prompt Export - user2): all_known_sobriquets_summary 验证通过 (只含 '老李')。摘要: {summary_u2}")
             else:

@@ -5,7 +5,7 @@ import random
 import time
 import json
 import re
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Callable # Callable for type hint
 
 from stubs.mock_config import global_config
 from stubs.mock_dependencies import (
@@ -15,22 +15,27 @@ from stubs.mock_dependencies import (
     MockChatStream, 
     MockMessageRecv, 
     get_raw_msg_before_timestamp_with_chat, 
-    build_readable_messages,
+    build_readable_messages, 
 )
 from stubs.mock_dependencies import relationship_manager as mock_relationship_manager
 
-# 导入新的 ProfileDB (之前是 SobriquetDB)
-from profile.profile_db import ProfileDB
-# ProfileManager 实例会通过构造函数传入
 
-from .sobriquet_mapper import _build_mapping_prompt
+from profile.profile_db import ProfileDB
+# from profile.profile_manager import ProfileManager # ProfileManager 实例会通过构造函数传入
+
+from .sobriquet_mapper import build_mapping_prompt
 from .sobriquet_utils import select_sobriquets_for_prompt, format_sobriquet_prompt_injection
 
 
 logger = get_logger("SobriquetManager")
-logger_helper = get_logger("AsyncLoopHelper")
+logger_helper = get_logger("AsyncLoopHelper") # run_async_loop 的 logger
 
+# --- 确保 run_async_loop 函数在此处定义 ---
 def run_async_loop(loop: asyncio.AbstractEventLoop, coro):
+    """
+    在一个新的事件循环中运行一个协程直到完成，并处理清理工作。
+    """
+    asyncio.set_event_loop(loop) # 确保循环被设置为当前线程的事件循环
     try:
         logger_helper.debug(f"Running coroutine in loop {id(loop)}...")
         result = loop.run_until_complete(coro)
@@ -42,21 +47,34 @@ def run_async_loop(loop: asyncio.AbstractEventLoop, coro):
         logger_helper.error(f"Error in async loop {id(loop)}: {e}", exc_info=True)
     finally:
         try:
+            # 清理所有未完成的任务
             all_tasks = asyncio.all_tasks(loop)
-            current_task = asyncio.current_task(loop)
-            tasks_to_cancel = [task for task in all_tasks if task is not current_task]
+            current_task = asyncio.current_task(loop) # 可能为 None，如果循环未运行或在主线程
+            tasks_to_cancel = [task for task in all_tasks if task is not current_task and not task.done()]
+            
             if tasks_to_cancel:
                 logger_helper.info(f"Cancelling {len(tasks_to_cancel)} outstanding tasks in loop {id(loop)}...")
-                for task in tasks_to_cancel: task.cancel()
+                for task in tasks_to_cancel:
+                    task.cancel()
+                # 等待所有取消的任务完成
                 loop.run_until_complete(asyncio.gather(*tasks_to_cancel, return_exceptions=True))
                 logger_helper.info(f"Outstanding tasks cancelled in loop {id(loop)}.")
-            if loop.is_running(): loop.stop(); logger_helper.info(f"Asyncio loop {id(loop)} stopped.")
+
+            # 关闭异步生成器
+            if hasattr(loop, 'shutdown_asyncgens'): # 检查方法是否存在 (Python 3.6+)
+                 loop.run_until_complete(loop.shutdown_asyncgens())
+                 logger_helper.debug(f"Async generators shutdown in loop {id(loop)}.")
+
+            # 停止并关闭循环
+            if loop.is_running():
+                loop.stop()
+                logger_helper.info(f"Asyncio loop {id(loop)} stopped.")
             if not loop.is_closed():
-                loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
                 logger_helper.info(f"Asyncio loop {id(loop)} closed.")
         except Exception as close_err:
             logger_helper.error(f"Error during asyncio loop cleanup for loop {id(loop)}: {close_err}", exc_info=True)
+# --- run_async_loop 定义结束 ---
 
 
 class SobriquetManager:
@@ -114,7 +132,7 @@ class SobriquetManager:
             self._initialized = True
             logger.info(f"SobriquetManager 初始化完成。当前启用状态: {self.is_enabled}")
 
-    def start_processor(self): # <--- 确保此方法存在且完整
+    def start_processor(self):
         if not self.is_enabled: 
             logger.info("绰号处理功能已禁用，处理器未启动。")
             return
@@ -132,12 +150,12 @@ class SobriquetManager:
         else: 
             logger.warning("绰号处理器线程已在运行中。")
 
-    def stop_processor(self): # <--- 确保此方法存在且完整
+    def stop_processor(self):
         if self._sobriquet_thread and self._sobriquet_thread.is_alive():
             logger.info("正在停止绰号处理器线程...")
             self._stop_event.set()
             try: 
-                self.sobriquet_queue.put_nowait(None) # 尝试唤醒队列以检查停止事件
+                self.sobriquet_queue.put_nowait(None)
             except asyncio.QueueFull: 
                 logger.debug("停止处理器时队列已满，项目将在处理后停止。")
             except Exception as e:
@@ -156,9 +174,9 @@ class SobriquetManager:
         else: 
             logger.info("绰号处理器线程未在运行或已被清理。")
 
-    async def _add_to_queue(self, item: tuple, platform: str, group_id: str): # <--- 确保此方法存在且完整
+    async def _add_to_queue(self, item: tuple, platform: str, group_id: str):
         try:
-            if self._stop_event.is_set() and item is not None: # 如果已发出停止信号，则不再添加新任务
+            if self._stop_event.is_set() and item is not None:
                  logger.info(f"停止事件已设置，不再添加新项目到队列: {platform}-{group_id}")
                  return
             await self.sobriquet_queue.put(item)
@@ -185,31 +203,42 @@ class SobriquetManager:
             history_limit = global_config.profile.sobriquet_analysis_history_limit
             logger.debug(f"{log_prefix} Attempting to get history. Chat history provider (id: {id(self.chat_history_provider)}) keys: {list(self.chat_history_provider.keys())}")
             logger.debug(f"{log_prefix} Current stream ID for history lookup: {current_chat_stream.stream_id}")
+            
             history_messages = get_raw_msg_before_timestamp_with_chat(
                 current_chat_stream.stream_id, time.time(), history_limit, self.chat_history_provider 
             )
-            chat_history_str = await build_readable_messages(history_messages, True, False, "relative", 0.0, False)
-            bot_reply_str = " ".join(bot_reply) if bot_reply else ""
-            group_id = str(current_chat_stream.group_info.group_id)
-            platform = current_chat_stream.platform
-            user_ids_in_history = {str(msg["user_info"]["user_id"]) for msg in history_messages if msg.get("user_info", {}).get("user_id")}
-            user_name_map = {} 
+            
+            user_ids_in_history = list(set(str(msg["user_info"]["user_id"]) for msg in history_messages if msg.get("user_info", {}).get("user_id")))
+            user_name_map: Dict[str, str] = {} 
             if user_ids_in_history:
                 try:
-                    names_data = await mock_relationship_manager.get_person_names_batch(platform, list(user_ids_in_history))
+                    names_data = await mock_relationship_manager.get_person_names_batch(current_chat_stream.platform, user_ids_in_history)
+                    user_name_map.update(names_data) 
                 except Exception as e:
-                    logger.error(f"{log_prefix} 批量获取 person_name (模拟) 出错: {e}", exc_info=True); names_data = {}
+                    logger.error(f"{log_prefix} 批量获取 person_name (模拟) 出错: {e}", exc_info=True)
+                
                 for uid_str in user_ids_in_history:
-                    if uid_str in names_data and names_data[uid_str]: 
-                        user_name_map[uid_str] = names_data[uid_str]
-                    else: 
-                        latest_display_name = next((m["user_info"].get("user_nickname") or m["user_info"].get("user_cardname") 
+                    if uid_str not in user_name_map or not user_name_map[uid_str]:
+                        latest_display_name = next((m["user_info"].get("user_cardname") or m["user_info"].get("user_nickname")
                                                    for m in reversed(history_messages) 
                                                    if str(m["user_info"].get("user_id")) == uid_str and 
                                                       (m["user_info"].get("user_nickname") or m["user_info"].get("user_cardname"))), None)
                         bot_uid_str = str(global_config.bot.qq_account)
-                        user_name_map[uid_str] = (latest_display_name or f"{global_config.bot.nickname}(你)") if uid_str == bot_uid_str \
-                                               else (latest_display_name or f"用户({uid_str[-4:] if len(uid_str) >=4 else uid_str})") 
+                        if uid_str == bot_uid_str:
+                            user_name_map[uid_str] = latest_display_name or f"{global_config.bot.nickname}(你)"
+                        else:
+                            user_name_map[uid_str] = latest_display_name or f"用户({uid_str[-4:] if len(uid_str) >=4 else uid_str})"
+            
+            chat_history_str = await build_readable_messages(
+                history_messages,
+                user_name_provider=mock_relationship_manager.get_person_names_batch, 
+                platform_for_names=current_chat_stream.platform
+            )
+
+            bot_reply_str = " ".join(bot_reply) if bot_reply else ""
+            group_id = str(current_chat_stream.group_info.group_id)
+            platform = current_chat_stream.platform
+                       
             item = (chat_history_str, bot_reply_str, platform, group_id, user_name_map)
             await self._add_to_queue(item, platform, group_id)
         except Exception as e: logger.error(f"{log_prefix} 触发绰号分析时出错: {e}", exc_info=True)
@@ -239,7 +268,6 @@ class SobriquetManager:
                 return injection_str
             else: logger.debug(f"{log_prefix} 未从 ProfileManager 获取到绰号数据。"); return ""
         except Exception as e: logger.error(f"{log_prefix} 获取绰号注入时出错: {e}", exc_info=True); return ""
-
 
     async def _analyze_and_update_sobriquets(self, item: tuple):
         if not isinstance(item, tuple) or len(item) != 5:
@@ -292,18 +320,14 @@ class SobriquetManager:
     async def _call_llm_for_analysis( self, chat_history_str: str, bot_reply: str,user_name_map: Dict[str, str]) -> Dict[str, Any]:
         if not self.llm_mapper_fn: 
             logger.error("LLM映射函数 (模拟) 未初始化。"); return {"is_exist": False}
-        
-        prompt = _build_mapping_prompt(chat_history_str, bot_reply, user_name_map) 
-        
+        prompt = build_mapping_prompt(chat_history_str, bot_reply, user_name_map) 
+        print(chat_history_str)
         try:
             response_content, _, _ = self.llm_mapper_fn(prompt) 
-            
             if not response_content: 
                 logger.warning("LLM (模拟) 返回空绰号映射内容。"); return {"is_exist": False}
-            
             stripped_content = response_content.strip()
             json_str = ""
-            
             m_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped_content, re.DOTALL)
             if m_match:
                 json_str = m_match.group(1).strip()
@@ -319,25 +343,20 @@ class SobriquetManager:
                 else:
                     logger.warning(f"LLM (模拟) 响应不含有效JSON。响应(首200): {stripped_content[:200]}")
                     return {"is_exist": False}
-
             logger.debug(f"将要解析的 JSON 字符串 (repr): {repr(json_str)}")
             logger.debug(f"将要解析的 JSON 字符串 (直接): {json_str}")
             logger.debug(f"Length of stripped_content: {len(stripped_content)}") 
             logger.debug(f"Length of json_str: {len(json_str)}") 
             logger.debug(f"Is stripped_content == json_str? : {stripped_content == json_str}") 
-
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError as je: 
                 logger.error(f"解析LLM (模拟) JSON失败: {je}\nJSON str (repr): {repr(json_str)}\n原始响应(首500): {stripped_content[:500]}"); return {"is_exist": False}
-            
             if not isinstance(result, dict): 
                 logger.warning(f"LLM (模拟) 响应非字典。类型: {type(result)}"); return {"is_exist": False}
-            
             is_exist = result.get("is_exist")
             if not isinstance(is_exist, bool): 
                 logger.warning(f"LLM (模拟) 'is_exist'字段无效: {is_exist}"); return {"is_exist": False} 
-            
             if is_exist:
                 data = result.get("data")
                 if isinstance(data, dict) and data:
@@ -345,7 +364,6 @@ class SobriquetManager:
                     if not filtered: logger.info("所有绰号映射均被过滤。"); return {"is_exist": False, "data": {}}
                     logger.info(f"过滤后绰号映射: {filtered}"); return {"is_exist": True, "data": filtered}
                 logger.warning(f"LLM (模拟) is_exist=True 但 data 无效: {data}"); return {"is_exist": False, "data": {}}
-            
             logger.info("LLM (模拟) 明确未找到绰号映射 (is_exist=False)。"); return {"is_exist": False, "data": {}}
         except Exception as e: 
             logger.error(f"LLM (模拟) 调用或处理中意外错误: {e}", exc_info=True); return {"is_exist": False, "data": {}}
@@ -353,7 +371,6 @@ class SobriquetManager:
     def _filter_llm_results(self, original_data: Dict[str, str], user_name_map_for_prompt: Dict[str, str]) -> Dict[str, str]:
         filtered = {}; bot_qq = str(global_config.bot.qq_account) if global_config.bot.qq_account else None
         min_l, max_l = global_config.profile.sobriquet_min_length, global_config.profile.sobriquet_max_length
-        
         for uid, s_name in original_data.items():
             if not isinstance(uid, str) or not isinstance(s_name, str): continue
             user_display_name_in_map = user_name_map_for_prompt.get(uid, "")
@@ -368,33 +385,23 @@ class SobriquetManager:
             filtered[uid] = cleaned_s
         return filtered
 
-    def _run_processor_in_thread(self):
-        tid = threading.get_ident(); logger.info(f"绰号处理器线程启动 (ID: {tid})...")
+    def _run_processor_in_thread(self): # <--- 确保此方法存在且完整
+        tid = threading.get_ident()
+        logger.info(f"绰号处理器线程启动 (ID: {tid})...")
         loop = None 
         try:
-            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-            logger.info(f"(ID: {tid}) Asyncio事件循环已创建设置。")
-            run_async_loop(loop, self._processing_loop()) 
+            loop = asyncio.new_event_loop()
+            # asyncio.set_event_loop(loop) # 这行由 run_async_loop 处理
+            logger.info(f"(ID: {tid}) Asyncio事件循环已创建。")
+            run_async_loop(loop, self._processing_loop()) # 调用模块级别的 run_async_loop
         except Exception as e: 
             logger.error(f"绰号处理器线程(ID:{tid})顶层错误: {e}", exc_info=True)
         finally: 
-            if loop and not loop.is_closed(): 
-                logger.warning(f"绰号处理器线程(ID:{tid})意外结束，尝试关闭事件循环。")
-                try:
-                    if loop.is_running(): loop.stop()
-                    all_tasks = asyncio.all_tasks(loop)
-                    tasks_to_cancel = [task for task in all_tasks if task is not asyncio.current_task(loop)] 
-                    if tasks_to_cancel:
-                        for task in tasks_to_cancel: task.cancel()
-                        loop.run_until_complete(asyncio.gather(*tasks_to_cancel, return_exceptions=True))
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                    loop.close()
-                    logger.info(f"事件循环 (ID: {id(loop)}) 已在 finally 块中关闭。")
-                except Exception as close_err:
-                    logger.error(f"在 finally 块中关闭事件循环 (ID: {id(loop)}) 时出错: {close_err}", exc_info=True)
+            # run_async_loop 内部会处理 loop 的关闭，这里不再重复关闭
+            # 以避免 "Event loop is closed" 错误
             logger.info(f"绰号处理器线程结束 (ID: {tid}).")
 
-    async def _processing_loop(self):
+    async def _processing_loop(self): # <--- 确保此方法存在且完整
         logger.info("绰号异步处理循环已启动。")
         while not self._stop_event.is_set():
             try:

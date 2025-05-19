@@ -11,7 +11,7 @@ from stubs.mock_dependencies import get_logger
 logger = get_logger("sobriquet_mapper")
 
 
-def _build_mapping_prompt(chat_history_str: str, bot_reply: str, user_name_map: Dict[str, str]) -> str:
+def build_mapping_prompt(chat_history_str: str, bot_reply: str, user_name_map: Dict[str, str]) -> str:
     """
     构建用于 LLM 进行绰号映射分析的 Prompt。
 

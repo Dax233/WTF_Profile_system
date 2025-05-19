@@ -3,12 +3,12 @@
 
 import logging
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable, Awaitable 
 
+from stubs.mock_config import global_config
 # --- 模拟 Logger ---
 def get_logger(name):
     logger = logging.getLogger(name)
-    # 由 main_test.py 中的 basicConfig 统一处理 Handler 和基本级别
     return logger
 
 # --- 模拟 src.common.database ---
@@ -32,8 +32,8 @@ class MockDbCollection:
         return []
 
 class MockDatabase:
-    def __init__(self, sobriquet_db_instance):
-        self.profile_info = MockDbCollection(sobriquet_db_instance, "profile_info")
+    def __init__(self, profile_db_instance): 
+        self.profile_info = MockDbCollection(profile_db_instance, "profile_info")
 
 # --- 模拟 PersonInfoManager ---
 class MockPersonInfoManager:
@@ -64,13 +64,13 @@ class MockRelationshipManager:
             ("qq", "user123"): "张三",
             ("qq", "user456"): "李四",
             ("qq", "user789"): "王五",
-            ("test_platform", "test_user_1"): "测试用户一",
+            ("test_platform", "test_user_1"): "张三", 
         }
         self.logger = get_logger("MockRelationshipManager")
 
     async def get_person_names_batch(self, platform: str, user_ids: List[str]) -> Dict[str, str]:
         results = {}
-        for user_id_str in user_ids: # 确保是字符串
+        for user_id_str in user_ids: 
             name = self.user_to_name_map.get((platform, str(user_id_str)))
             if name:
                 results[str(user_id_str)] = name
@@ -89,16 +89,11 @@ MOCK_LLM_RESPONSES: Dict[str, str] = {}
 def mock_llm_generate_response(prompt: str, context_user_id: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[str]]:
     logger = get_logger("mock_llm_generate_response")
     logger.debug(f"Mock LLM called with prompt (first 100 chars): {prompt[:100]}...")
-    
-    # --- 修改点：逆序遍历 MOCK_LLM_RESPONSES 的键 ---
-    # 这样，最新设置的、且其 identifier 存在于 prompt 中的模拟响应将被优先使用。
-    # 这依赖于 Python 3.7+ 字典保持插入顺序的特性。
     for key in reversed(list(MOCK_LLM_RESPONSES.keys())):
         response_data = MOCK_LLM_RESPONSES[key]
         if key in prompt: 
             logger.info(f"Found mock response for key '{key}' (searched in reverse) in prompt.")
             return response_data, "mock_model_name", "mock_finish_reason_reversed_match"
-            
     default_response = """
     {
         "is_exist": false
@@ -111,29 +106,39 @@ def set_mock_llm_response(identifier: str, response_json_string: str):
     MOCK_LLM_RESPONSES[identifier] = response_json_string
     get_logger("set_mock_llm_response").info(f"Set mock LLM response for identifier '{identifier}'.")
 
+
 # --- 模拟 ChatStream 和 MessageRecv ---
 class MockUserInfo:
     def __init__(self, user_id, user_nickname=None, user_cardname=None):
-        self.user_id = user_id
-        self.user_nickname = user_nickname if user_nickname else f"Nick-{user_id}"
-        self.user_cardname = user_cardname if user_cardname else f"Card-{user_id}"
+        self.user_id = str(user_id) 
+        self.user_nickname = user_nickname if user_nickname else f"Nick-{self.user_id}"
+        self.user_cardname = user_cardname if user_cardname else f"Card-{self.user_id}"
 
 class MockGroupInfo:
     def __init__(self, group_id):
-        self.group_id = group_id
+        self.group_id = str(group_id) 
 
 class MockChatStream:
     def __init__(self, stream_id, platform, group_id):
-        self.stream_id = stream_id
-        self.platform = platform
+        self.stream_id = str(stream_id)
+        self.platform = str(platform)
         self.group_info = MockGroupInfo(group_id)
         self.messages: List[Dict[str, Any]] = [] 
         self.recent_speakers_list: List[Dict[str, Any]] = []
+        self.logger = get_logger(f"MockChatStream({self.stream_id})") # <--- 初始化 logger
 
     def add_message(self, user_id: str, text: str, timestamp: Optional[float] = None):
         msg_timestamp = timestamp or time.time()
+        current_user_id_str = str(user_id) 
+        
+        user_display_name_info = relationship_manager.user_to_name_map.get((self.platform, current_user_id_str))
+        
         msg = {
-            "user_info": {"user_id": str(user_id), "user_nickname": f"Nick-{user_id}", "user_cardname": f"Card-{user_id}"},
+            "user_info": {
+                "user_id": current_user_id_str, 
+                "user_nickname": user_display_name_info or f"Nick-{current_user_id_str}", 
+                "user_cardname": user_display_name_info or f"Card-{current_user_id_str}"
+            },
             "message_content": text,
             "timestamp": msg_timestamp
         }
@@ -141,10 +146,12 @@ class MockChatStream:
 
         self.recent_speakers_list = [
             speaker_info for speaker_info in self.recent_speakers_list 
-            if speaker_info.get("user_id") != str(user_id)
+            if speaker_info.get("user_id") != current_user_id_str
         ]
-        self.recent_speakers_list.append({"user_id": str(user_id), "timestamp": msg_timestamp})
+        self.recent_speakers_list.append({"user_id": current_user_id_str, "timestamp": msg_timestamp})
         self.recent_speakers_list.sort(key=lambda x: x["timestamp"], reverse=True)
+        self.logger.debug(f"Message added by user_id {current_user_id_str}. Total messages: {len(self.messages)}") # <--- 使用 self.logger
+
 
     def get_recent_speakers(self, limit: int = 5) -> List[Dict[str, Any]]:
         return self.recent_speakers_list[:limit]
@@ -167,21 +174,43 @@ def get_raw_msg_before_timestamp_with_chat(stream_id: str, timestamp: float, lim
     return []
 
 async def build_readable_messages(
-    messages: List[Dict],
-    include_bot_self: bool = True,
-    is_gocq_format: bool = False,
+    messages: List[Dict], 
+    user_name_provider: Optional[Callable[[str, List[str]], Awaitable[Dict[str, str]]]] = None, 
+    platform_for_names: Optional[str] = None, 
+    include_bot_self: bool = True, 
+    is_gocq_format: bool = False, 
     time_format_type: str = "relative", 
     time_offset_seconds: float = 0.0,
-    use_plain_text: bool = False,
+    use_plain_text: bool = False, 
 ) -> str:
-    logger = get_logger("build_readable_messages")
+    logger_bm = get_logger("build_readable_messages")
     readable_parts = []
+    
+    user_ids_in_messages = list(set(msg.get("user_info", {}).get("user_id") for msg in messages if msg.get("user_info", {}).get("user_id")))
+    
+    display_names_map: Dict[str, str] = {}
+    if user_name_provider and platform_for_names and user_ids_in_messages:
+        try:
+            display_names_map = await user_name_provider(platform_for_names, user_ids_in_messages)
+        except Exception as e:
+            logger_bm.error(f"Error calling user_name_provider: {e}")
+
     for msg in reversed(messages): 
-        user_id = msg.get("user_info", {}).get("user_id", "UnknownUser")
-        name_to_display = msg.get("user_info", {}).get("user_cardname") or \
-                          msg.get("user_info", {}).get("user_nickname") or \
-                          user_id
+        user_info = msg.get("user_info", {})
+        user_id = user_info.get("user_id", "UnknownUser")
         
+        name_to_display = display_names_map.get(user_id)
+        
+        if not name_to_display: 
+            name_to_display = user_info.get("user_cardname") or \
+                              user_info.get("user_nickname")
+        
+        if not name_to_display: 
+            if user_id == str(global_config.bot.qq_account): 
+                 name_to_display = f"{global_config.bot.nickname}(你)"
+            else:
+                 name_to_display = f"User({user_id[-4:] if len(user_id) >=4 else user_id})"
+
         content = msg.get("message_content", "")
         ts = msg.get("timestamp", 0)
         time_str = ""
@@ -202,5 +231,5 @@ async def build_readable_messages(
         readable_parts.append(f"{time_str}{name_to_display}: {content}")
     
     result = "\n".join(readable_parts)
-    logger.debug(f"Built readable messages (first 100 chars): {result[:100]}")
+    logger_bm.debug(f"Built readable messages (first 100 chars): {result[:100]}")
     return result
