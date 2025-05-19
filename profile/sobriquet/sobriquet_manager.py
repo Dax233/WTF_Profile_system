@@ -7,7 +7,6 @@ import json
 import re
 from typing import Dict, Optional, List, Any
 
-# 从 stubs 导入
 from stubs.mock_config import global_config
 from stubs.mock_dependencies import (
     get_logger, 
@@ -20,8 +19,10 @@ from stubs.mock_dependencies import (
 )
 from stubs.mock_dependencies import relationship_manager as mock_relationship_manager
 
+# 导入新的 ProfileDB (之前是 SobriquetDB)
+from profile.profile_db import ProfileDB
+# ProfileManager 实例会通过构造函数传入
 
-from ..profile_db import ProfileDB
 from .sobriquet_mapper import _build_mapping_prompt
 from .sobriquet_utils import select_sobriquets_for_prompt, format_sobriquet_prompt_injection
 
@@ -78,19 +79,19 @@ class SobriquetManager:
             if hasattr(self, "_initialized") and self._initialized: 
                 return
             
-            logger.info("正在初始化 SobriquetManager 组件 (SQLite 版本)...")
+            logger.info("正在初始化 SobriquetManager 组件 (使用 ProfileDB)...")
             self.is_enabled = global_config.profile.enable_sobriquet_mapping
 
-            self.db_handler = db_handler 
+            self.db_handler: ProfileDB = db_handler 
             if not self.db_handler or not self.db_handler.is_available():
-                logger.error(f"SobriquetDB 初始化失败或不可用，功能受限。")
+                logger.error(f"ProfileDB 初始化失败或不可用，功能受限。")
                 self.is_enabled = False
             else:
-                logger.info(f"SobriquetDB (SQLite, path: {self.db_handler.db_path}) 初始化成功。")
+                logger.info(f"ProfileDB (SQLite, path: {self.db_handler.db_path}) 初始化成功。")
             
             self.profile_manager = profile_manager_instance 
             if not self.profile_manager or not self.profile_manager.is_available():
-                logger.error(f"ProfileManager (SQLite) 不可用，功能将受限。")
+                logger.error(f"ProfileManager 不可用，功能将受限。")
                 self.is_enabled = False
             
             self.llm_mapper_fn = mock_llm_generate_response 
@@ -105,7 +106,6 @@ class SobriquetManager:
             self.chat_history_provider = chat_history_provider if chat_history_provider is not None else {}
             logger.debug(f"SobriquetManager initialized with chat_history_provider (id: {id(self.chat_history_provider)}), keys: {list(self.chat_history_provider.keys())}")
 
-
             self.queue_max_size = global_config.profile.sobriquet_queue_max_size
             self.sobriquet_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_max_size)
             self._stop_event = threading.Event()
@@ -114,44 +114,59 @@ class SobriquetManager:
             self._initialized = True
             logger.info(f"SobriquetManager 初始化完成。当前启用状态: {self.is_enabled}")
 
-    def start_processor(self):
-        if not self.is_enabled: logger.info("绰号处理功能已禁用，处理器未启动。"); return
+    def start_processor(self): # <--- 确保此方法存在且完整
+        if not self.is_enabled: 
+            logger.info("绰号处理功能已禁用，处理器未启动。")
+            return
         max_sobriquets_cfg = global_config.profile.max_sobriquets_in_prompt
         if not isinstance(max_sobriquets_cfg, int) or max_sobriquets_cfg <= 0:
-            logger.error(f"[错误] 配置 'max_sobriquets_in_prompt'({max_sobriquets_cfg})不合适，功能禁用！"); self.is_enabled = False; return
+            logger.error(f"[错误] 配置 'max_sobriquets_in_prompt'({max_sobriquets_cfg})不合适，功能禁用！")
+            self.is_enabled = False
+            return
         if self._sobriquet_thread is None or not self._sobriquet_thread.is_alive():
-            logger.info("正在启动绰号处理器线程..."); self._stop_event.clear()
+            logger.info("正在启动绰号处理器线程...")
+            self._stop_event.clear()
             self._sobriquet_thread = threading.Thread(target=self._run_processor_in_thread, daemon=True)
             self._sobriquet_thread.start()
             logger.info(f"绰号处理器线程已启动 (ID: {self._sobriquet_thread.ident})")
-        else: logger.warning("绰号处理器线程已在运行中。")
+        else: 
+            logger.warning("绰号处理器线程已在运行中。")
 
-    def stop_processor(self):
+    def stop_processor(self): # <--- 确保此方法存在且完整
         if self._sobriquet_thread and self._sobriquet_thread.is_alive():
-            logger.info("正在停止绰号处理器线程..."); self._stop_event.set()
-            try: self.sobriquet_queue.put_nowait(None) 
-            except asyncio.QueueFull: pass 
-            except Exception: pass
+            logger.info("正在停止绰号处理器线程...")
+            self._stop_event.set()
+            try: 
+                self.sobriquet_queue.put_nowait(None) # 尝试唤醒队列以检查停止事件
+            except asyncio.QueueFull: 
+                logger.debug("停止处理器时队列已满，项目将在处理后停止。")
+            except Exception as e:
+                logger.warning(f"停止处理器时向队列发送 None 失败: {e}")
 
             try:
-                self._sobriquet_thread.join(timeout=max(2, self.sleep_interval * 2)) 
-                if self._sobriquet_thread.is_alive(): logger.warning("绰号处理器线程在超时后仍未停止。")
-            except Exception as e: logger.error(f"停止绰号处理器线程时出错: {e}", exc_info=True)
+                self._sobriquet_thread.join(timeout=max(2.0, self.sleep_interval * 2)) 
+                if self._sobriquet_thread.is_alive(): 
+                    logger.warning("绰号处理器线程在超时后仍未停止。")
+            except Exception as e: 
+                logger.error(f"停止绰号处理器线程时出错: {e}", exc_info=True)
             finally:
-                if self._sobriquet_thread and not self._sobriquet_thread.is_alive(): logger.info("绰号处理器线程已成功停止。")
+                if self._sobriquet_thread and not self._sobriquet_thread.is_alive(): 
+                    logger.info("绰号处理器线程已成功停止。")
                 self._sobriquet_thread = None
-        else: logger.info("绰号处理器线程未在运行或已被清理。")
+        else: 
+            logger.info("绰号处理器线程未在运行或已被清理。")
 
-    async def _add_to_queue(self, item: tuple, platform: str, group_id: str):
+    async def _add_to_queue(self, item: tuple, platform: str, group_id: str): # <--- 确保此方法存在且完整
         try:
-            if self._stop_event.is_set() and item is not None:
+            if self._stop_event.is_set() and item is not None: # 如果已发出停止信号，则不再添加新任务
                  logger.info(f"停止事件已设置，不再添加新项目到队列: {platform}-{group_id}")
                  return
             await self.sobriquet_queue.put(item)
             logger.debug(f"项目已添加至 {platform}-{group_id} 绰号队列。大小: {self.sobriquet_queue.qsize()}")
-        except asyncio.QueueFull: logger.warning(f"绰号队列已满。{platform}-{group_id} 项目被丢弃。")
-        except Exception as e: logger.error(f"添加项目到绰号队列出错: {e}", exc_info=True)
-
+        except asyncio.QueueFull: 
+            logger.warning(f"绰号队列已满。{platform}-{group_id} 项目被丢弃。")
+        except Exception as e: 
+            logger.error(f"添加项目到绰号队列出错: {e}", exc_info=True)
 
     async def trigger_sobriquet_analysis(
         self, anchor_message: MockMessageRecv, bot_reply: List[str], chat_stream: Optional[MockChatStream] = None
@@ -168,21 +183,15 @@ class SobriquetManager:
         log_prefix = f"[{current_chat_stream.stream_id}]"
         try:
             history_limit = global_config.profile.sobriquet_analysis_history_limit
-            
             logger.debug(f"{log_prefix} Attempting to get history. Chat history provider (id: {id(self.chat_history_provider)}) keys: {list(self.chat_history_provider.keys())}")
             logger.debug(f"{log_prefix} Current stream ID for history lookup: {current_chat_stream.stream_id}")
-
             history_messages = get_raw_msg_before_timestamp_with_chat(
-                current_chat_stream.stream_id, 
-                time.time(), 
-                history_limit,
-                self.chat_history_provider 
+                current_chat_stream.stream_id, time.time(), history_limit, self.chat_history_provider 
             )
             chat_history_str = await build_readable_messages(history_messages, True, False, "relative", 0.0, False)
             bot_reply_str = " ".join(bot_reply) if bot_reply else ""
             group_id = str(current_chat_stream.group_info.group_id)
             platform = current_chat_stream.platform
-            
             user_ids_in_history = {str(msg["user_info"]["user_id"]) for msg in history_messages if msg.get("user_info", {}).get("user_id")}
             user_name_map = {} 
             if user_ids_in_history:
@@ -190,7 +199,6 @@ class SobriquetManager:
                     names_data = await mock_relationship_manager.get_person_names_batch(platform, list(user_ids_in_history))
                 except Exception as e:
                     logger.error(f"{log_prefix} 批量获取 person_name (模拟) 出错: {e}", exc_info=True); names_data = {}
-                
                 for uid_str in user_ids_in_history:
                     if uid_str in names_data and names_data[uid_str]: 
                         user_name_map[uid_str] = names_data[uid_str]
@@ -202,7 +210,6 @@ class SobriquetManager:
                         bot_uid_str = str(global_config.bot.qq_account)
                         user_name_map[uid_str] = (latest_display_name or f"{global_config.bot.nickname}(你)") if uid_str == bot_uid_str \
                                                else (latest_display_name or f"用户({uid_str[-4:] if len(uid_str) >=4 else uid_str})") 
-            
             item = (chat_history_str, bot_reply_str, platform, group_id, user_name_map)
             await self._add_to_queue(item, platform, group_id)
         except Exception as e: logger.error(f"{log_prefix} 触发绰号分析时出错: {e}", exc_info=True)
@@ -211,18 +218,15 @@ class SobriquetManager:
         if not self.is_enabled or not chat_stream or not chat_stream.group_info: return ""
         if not self.profile_manager or not self.profile_manager.is_available(): 
             logger.warning("ProfileManager 不可用，无法获取绰号注入。"); return ""
-
         log_prefix = f"[{chat_stream.stream_id}]"
         try:
             group_id = str(chat_stream.group_info.group_id)
             platform = chat_stream.platform
             user_ids_in_context = {str(msg["user_info"]["user_id"]) for msg in message_list_before_now if msg.get("user_info", {}).get("user_id")}
-            
             if not user_ids_in_context: 
                 limit = global_config.profile.recent_speakers_limit_for_injection
                 recent_speakers_data = chat_stream.get_recent_speakers(limit=limit)
                 user_ids_in_context.update(str(s["user_id"]) for s in recent_speakers_data if s.get("user_id"))
-
             if not user_ids_in_context: logger.debug(f"{log_prefix} 无上下文用户用于绰号注入。"); return ""
             
             data_for_prompt = await self.profile_manager.get_users_group_sobriquets_for_prompt_injection_data(
@@ -247,7 +251,7 @@ class SobriquetManager:
 
         if not self.llm_mapper_fn: logger.error(f"{log_prefix} LLM 映射函数 (模拟) 不可用。"); return
         if not self.db_handler or not self.db_handler.is_available(): 
-            logger.error(f"{log_prefix} SobriquetDB (SQLite) 不可用。"); return
+            logger.error(f"{log_prefix} ProfileDB (SQLite) 不可用。"); return
 
         analysis_result = await self._call_llm_for_analysis(chat_history_str, bot_reply, user_name_map)
 
@@ -268,11 +272,11 @@ class SobriquetManager:
                     
                     profile_doc_id = self.profile_manager.generate_profile_document_id(person_info_pid)
                     
-                    self.db_handler.ensure_profile_document_exists(
+                    await self.db_handler.ensure_profile_document_exists(
                         profile_doc_id, person_info_pid, platform, platform_user_id_str
                     )
                     
-                    self.db_handler.update_group_sobriquet_count(
+                    await self.db_handler.update_group_sobriquet_count(
                         profile_doc_id, platform, group_id_str, sobriquet_name
                     )
                     
@@ -300,17 +304,14 @@ class SobriquetManager:
             stripped_content = response_content.strip()
             json_str = ""
             
-            # 尝试从 Markdown 代码块中提取 JSON
             m_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped_content, re.DOTALL)
             if m_match:
                 json_str = m_match.group(1).strip()
                 logger.debug("从 Markdown 代码块中提取 JSON。")
-            # 如果没有 Markdown，并且字符串看起来像一个 JSON 对象，则直接使用
             elif stripped_content.startswith("{") and stripped_content.endswith("}"):
                 json_str = stripped_content
                 logger.debug("假设剥离后的内容本身就是 JSON 字符串。")
             else:
-                # 作为后备，如果上述条件都不满足，尝试原始的更广泛的 regex 匹配（尽管对于我们的模拟情况，这不应该被触发）
                 b_match = re.search(r"(\{.*?\})", stripped_content, re.DOTALL)
                 if b_match:
                     json_str = b_match.group(1).strip()
@@ -321,6 +322,9 @@ class SobriquetManager:
 
             logger.debug(f"将要解析的 JSON 字符串 (repr): {repr(json_str)}")
             logger.debug(f"将要解析的 JSON 字符串 (直接): {json_str}")
+            logger.debug(f"Length of stripped_content: {len(stripped_content)}") 
+            logger.debug(f"Length of json_str: {len(json_str)}") 
+            logger.debug(f"Is stripped_content == json_str? : {stripped_content == json_str}") 
 
             try:
                 result = json.loads(json_str)
@@ -388,9 +392,7 @@ class SobriquetManager:
                     logger.info(f"事件循环 (ID: {id(loop)}) 已在 finally 块中关闭。")
                 except Exception as close_err:
                     logger.error(f"在 finally 块中关闭事件循环 (ID: {id(loop)}) 时出错: {close_err}", exc_info=True)
-
             logger.info(f"绰号处理器线程结束 (ID: {tid}).")
-
 
     async def _processing_loop(self):
         logger.info("绰号异步处理循环已启动。")
@@ -399,29 +401,23 @@ class SobriquetManager:
                 item = await asyncio.wait_for(self.sobriquet_queue.get(), timeout=self.sleep_interval)
                 if item is None: 
                     logger.info("处理循环收到 None item, 准备退出。")
-                    self.sobriquet_queue.task_done()
-                    break 
+                    self.sobriquet_queue.task_done(); break 
                 if self._stop_event.is_set(): 
                     logger.info("处理循环在获取项目后检测到停止事件，退出。")
-                    self.sobriquet_queue.task_done() 
-                    break
-
+                    self.sobriquet_queue.task_done(); break
                 await self._analyze_and_update_sobriquets(item)
                 self.sobriquet_queue.task_done()
-            except asyncio.TimeoutError: 
-                continue 
-            except asyncio.CancelledError: 
-                logger.info("绰号处理循环被取消。"); break
+            except asyncio.TimeoutError: continue 
+            except asyncio.CancelledError: logger.info("绰号处理循环被取消。"); break
             except Exception as e:
                 logger.error(f"绰号处理循环处理项目时出错: {e}", exc_info=True)
                 if not self._stop_event.is_set(): 
                     await asyncio.sleep(global_config.profile.error_sleep_interval)
-        
         while not self.sobriquet_queue.empty():
             try:
                 item = self.sobriquet_queue.get_nowait()
                 logger.info(f"处理循环结束，丢弃队列中剩余项目: {item is not None}")
                 self.sobriquet_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+            except asyncio.QueueEmpty: break
         logger.info("绰号异步处理循环已结束。")
+
