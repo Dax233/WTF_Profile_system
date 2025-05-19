@@ -3,12 +3,15 @@ import asyncio
 import time
 import os
 import json # 用于设置模拟LLM响应
+import sqlite3
+import logging
 
 # 导入修改后的管理器和数据库处理器
 from profile.sobriquet.sobriquet_db import SobriquetDB
-from profile_manager import ProfileManager
+from profile.profile_manager import ProfileManager
 from profile.sobriquet.sobriquet_manager import SobriquetManager
 
+from typing import Dict, List, Optional, Any, Tuple # 根据实际用到的添加
 # 导入模拟依赖
 from stubs.mock_config import global_config
 from stubs.mock_dependencies import (
